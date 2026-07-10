@@ -1,0 +1,39 @@
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Compiled objects and libraries
+*.o
+*.a
+*.la
+*.lo
+*.so
+*.dylib
+*.dll
+*.lib
+
+# Arduino & C++ Build outputs
+build/
+bin/
+obj/
+*.hex
+*.elf
+*.bin
+*.map
+*.d
+
+# MS Office temporary lockfiles
+~$*
+
+# IDE and System files
+.vs/
+.idea/
+.vscode/
+*.suo
+*.user
+*.userossc
+*.sln
+Thumbs.db
+.DS_Store
