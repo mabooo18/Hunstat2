@@ -57,9 +57,22 @@ graph TD
     WG -->|Optimasi otomatis Gain| GC
     EIS -->|Set Sinc filters / DFT| ADC
     
-    %% Parsing Data & Penyimpanan
-    CA & SWV & DPV & OCP & EIS & Ramp -->|7. Dekode biner 18-bit signed| Util
-    CA & SWV & DPV & OCP & EIS & Ramp -->|8. Simpan koordinat data| Storage
+    %% Parsing Data & Dekode 18-bit signed
+    CA -->|7. Dekode biner| Util
+    SWV -->|7. Dekode biner| Util
+    DPV -->|7. Dekode biner| Util
+    OCP -->|7. Dekode biner| Util
+    EIS -->|7. Dekode biner| Util
+    Ramp -->|7. Dekode biner| Util
+    
+    %% Penyimpanan koordinat data
+    CA -->|8. Simpan data| Storage
+    SWV -->|8. Simpan data| Storage
+    DPV -->|8. Simpan data| Storage
+    OCP -->|8. Simpan data| Storage
+    EIS -->|8. Simpan data| Storage
+    Ramp -->|8. Simpan data| Storage
+    
     Storage -->|9. Kirim koordinat ke serial| Host["Komputer / Python UI"]:::main
 ```
 
