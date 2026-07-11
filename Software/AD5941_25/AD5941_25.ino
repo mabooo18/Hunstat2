@@ -1,14 +1,5 @@
 /*
-    AUTHOR: Richard Morrison
-    EMAIL: instruments4chem@gmail.com
-
-    DISCLAIMER:
-    Instruments4Chem code, firmware, and software is released under the MIT License
-    (http://opensource.org/licenses/MIT).
-
-    The MIT License (MIT)
-
-    Copyright (c) 2024 Instruments4Chem, Melbourne, AUSTRALIA
+    AUTHOR: Kent
 
     Permission is hereby granted, free of charge, to any person obtaining a copy
     of this software and associated documentation files (the "Software"), to deal
