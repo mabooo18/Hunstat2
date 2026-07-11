@@ -44,7 +44,7 @@ graph TD
     Comm -->|2c. Jalankan DPV| DPV
     Comm -->|2d. Jalankan EIS| EIS
     Comm -->|2e. Jalankan OCP| OCP
-    Comm -->|2f. Jalankan CV ('M')| CV_Main
+    Comm -->|2f. Jalankan CV M| CV_Main
     
     %% Alur CV via Sequencer
     CV_Main -->|3. Siapkan Sequencer| Ramp
