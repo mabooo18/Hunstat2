@@ -2,6 +2,8 @@
 
 This document explains what an electrochemical method is, how it functions physically, and how the underlying physics are translated into C++ code in the HunStat2 firmware.
 
+> **Looking for the picture, not the prose?** `FLOWCHART.md` Part 2 has the same explanation as a set of signal-level flowcharts — system block diagram, excitation path, potentiostat feedback loop, a Generate/React/Detect three-stage view, the response path back to the PC, and a practical RCAL/gain selection table. The feedback-loop diagram is reproduced below since it's the one piece of physical intuition the rest of this document assumes.
+
 ---
 
 ## 1. What is an Electrochemical Method and How Does It Work?
@@ -69,23 +71,79 @@ Inside the AD5941 chip:
 * **Ohm's Law Conversion**: The firmware converts the raw ADC bits back into current using:
   $$\text{Current (Amperes)} = \frac{\text{Measured Voltage}}{\text{PGA Gain} \times R_{TIA}}$$
 
+The signal-level view of that same loop — where the closed loop is actually closed *through the reference electrode*, not the working electrode directly — looks like this (full-size version and four related diagrams in `FLOWCHART.md` Part 2):
+
+```mermaid
+graph TD
+    subgraph CHIP[Inside the AD5941]
+        DAC3[DAC<br/>builds the target E set]
+        OPAMP[Op-amp<br/>the CE driver]
+        ERR[Error amplifier<br/>compares E RE against E set]
+        DAC3 --> OPAMP
+    end
+
+    subgraph SPE2[Screen-Printed Electrode - 3 electrodes on 1 substrate]
+        CE2[CE - counter electrode]
+        WE2[WE - working electrode]
+        RE2[RE - reference electrode]
+    end
+
+    SOL[Electrolyte solution<br/>ions carry current between electrodes]
+    REDOX[Redox reaction at the WE surface<br/>produces the response current I of t]
+    TIA2[TIA<br/>current to voltage conversion]
+    ADC2[16 bit ADC<br/>digitizes I of t]
+    MCUOUT[RP2040 to PC GUI<br/>current data streamed over USB]
+
+    OPAMP -- V CE drives --> CE2
+    CE2 --> SOL --> WE2 --> REDOX --> TIA2 --> ADC2 --> MCUOUT
+    RE2 -- E RE feedback --> ERR
+    ERR -- correction signal --> OPAMP
+```
+
+If `E_RE` (what the reference electrode actually reports) doesn't match `E_set` (what the host asked for), the error amplifier keeps nudging `V_CE` — never the WE directly — until it does. This is why the switch matrix configuration seen throughout §3–§6 below always routes `RE0` to the potentiostat's sense input (`SWP_RE0`) rather than driving it: the RE's job is to *report*, the CE's job is to *supply current*, and the WE is where the chemistry under study actually happens.
+
+### 2.1. What the HSTIA Registers Actually Configure
+
+The transimpedance amplifier used by CA, SWV, DPV, and EIS (in "measure the cell" mode) is the **High-Speed TIA (HSTIA)**. It is configured through the `HpLoopCfg.HsTiaCfg` struct, written to silicon via `AD5940_HSLoopCfgS()`. Every field matters — leaving any of them at their zeroed/default state produces a TIA that either doesn't amplify at all or routes its output nowhere the ADC can see it (this exact mistake is what §3 below had to fix):
+
+| Field | What it controls | Value used here | Why |
+| :--- | :--- | :--- | :--- |
+| `HstiaRtiaSel` | Selects the feedback resistor $R_{TIA}$ from a fixed on-chip ladder (200 Ω … 160 kΩ, 8 steps) | `tia_rf` (0–7), synced with `RawToCurrent()`'s `rf_values[]` lookup | This *is* the "gain" of the current-to-voltage conversion — a bigger $R_{TIA}$ gives a bigger output voltage for the same cell current, at the cost of bandwidth and headroom. Getting this out of sync between the config side and the decode side (`RawToCurrent`) silently corrupts every reading by the mismatch ratio. |
+| `HstiaBias` | Sets the HSTIA's internal bias/common-mode voltage | `HSTIABIAS_1P1` (1.1 V) | Centers the TIA's output swing so both anodic and cathodic currents can be represented without clipping against the supply rail. |
+| `HstiaCtia` | Feedback capacitor in parallel with $R_{TIA}$, in pF | `16` | Provides high-frequency stability (bandwidth limiting) for the TIA feedback loop — without it the amplifier can ring or oscillate on fast current transients. |
+| `HstiaDeRtia` / `HstiaDeRload` | Routes the HSTIA's output to the DE0 pin (electrode drive) and configures an optional load resistor there | `HSTIADERTIA_TODE` / `HSTIADERLOAD_OPEN` | Connects the TIA's amplified output where the ADC multiplexer (`ADCMUXP_HSTIA_P`/`ADCMUXN_HSTIA_N`) expects to find it. `HSTIADERLOAD_OPEN` means no extra load is inserted — the DE0 path is only used as the TIA's own output tap here, not to drive an external electrode. |
+| `DiodeClose` | Optional protection diode across the TIA feedback path | `bFALSE` | Left open (not shorting the feedback path) for normal-range currents; the diode exists as an overload-protection option for extreme excursions. |
+
+If `HpLoopCfg.HsTiaCfg` is left unconfigured (all fields zero, the struct's default state), `HstiaRtiaSel` decodes to its lowest index and — critically — the DE routing does not connect the amplifier's output to anywhere the ADC mux can read, so conversions return a constant/garbage code that decodes to a current near zero no matter what the cell is actually doing. This is exactly the bug found and fixed in `C_CA`/`C_SWV`/`C_DPV` during this session — see §3 and the architecture document's §8.
+
 ---
 
 ## 3. Chronoamperometry (CA) in Code
 
 **Goal**: Apply a single constant voltage to the cell and record the current decay over time.
 
+*(Note: the class-based `C_CA` in `src/electrochemical_methods/c_ca.cpp` is the implementation that actually runs when the host sends `A` — see the architecture document §3.4 for why an older free-function `RunCA()` in the same folder is dead code and should be ignored when reading/patching this behavior.)*
+
 ### Step-by-Step Code Flow:
-1. **Set Voltage**: The host sends command `1` (e.g. `1400` for 400 mV). The code saves this in `CA_Voltage_mV`.
-2. **Initialize AFE**: The function `Config_AD5941_DCMeasurement(CA_Voltage_mV)` is called:
-   * It turns off the AC Waveform Generator (`AFECTRL_WG` set to false).
-   * It programs the DAC to output the target potential using `SetDACLevel(CA_Voltage_mV)`.
-   * It configures the switch matrix to route the TIA to the Working Electrode (`WE`).
-3. **Start ADC**: The function `MeasureCurrentRaw()` turns on the ADC power and conversions.
-4. **Delay**: It waits for a settling delay (`delayMicroseconds(500)`) to let the capacitive double-layer charging current settle.
-5. **Read Result**: The ADC captures a conversion sample (`AD5940_TakeMeasurement()`).
-6. **Convert to Current**: `RawToCurrent()` interprets the signed 16-bit raw code and divides it by the TIA resistor value ($R_f$) to compute Amperes.
-7. **Stream**: The coordinates are formatted (`CA,<time>,<current>`) and printed to the Serial port.
+1. **Set Voltage**: The host sends command `1<mV>` (e.g. `1400` for 400 mV), then `A` to run. `1<mV>` is stored in `m_pData->CA_Voltage_mV`; `2<seconds>` and `3<Hz>` set `CA_Duration_s` and `CA_SampleRate_Hz` the same way.
+2. **Compute sample count**: `C_CA::Run()` computes `CA_NumSamples = CA_Duration_s * CA_SampleRate_Hz` (clamped to at least 1) before starting.
+3. **Initialize AFE**: `C_CA::ConfigDCMeasurement(CA_Voltage_mV)` is called once, before the sampling loop starts (the DC level is held constant for the whole run — CA doesn't step voltage per sample):
+   * It turns off the AC Waveform Generator (`AFECTRL_WG` set to false) so the DAC holds a static level instead of a sine wave.
+   * It programs the High-Speed DAC to the target potential via `SetDACLevel(voltage_mV)`, wrapped in an `MMR`-type `WGCfg_Type` write.
+   * It configures the switch matrix to route Counter→`CE0`, Reference→`RE0`, Working(Sense)→`SE0` (`SWD_CE0`/`SWP_RE0`/`SWN_SE0`/`SWT_TRTIA|SWT_SE0LOAD`).
+   * It configures the HSTIA feedback block (see §2.1) — `HstiaRtiaSel` keyed off `tia_rf`, `HstiaBias = HSTIABIAS_1P1`, `HstiaCtia = 16 pF`, `HstiaDeRtia = HSTIADERTIA_TODE`.
+   * It powers up the DAC reference, external buffer, in-amp, HSTIA, HSDAC, and DC buffer amplifiers.
+   * It sets the ADC multiplexer to read across the HSTIA output (`ADCMUXP_HSTIA_P`/`ADCMUXN_HSTIA_N`) and sets PGA gain to 1×.
+   * It configures the ADC filter chain (Sinc3 OSR=4, Sinc2 OSR=1333, 16-sample averaging, notch enabled).
+   * It routes the `SINC2RDY` interrupt source into `AFEINTC_1` and clears any stale flag — required for the next step's ready-poll to ever see a true flag instead of timing out.
+4. **Sampling loop**: for each of the `CA_NumSamples` iterations:
+   * **Start ADC**: `C_CA::MeasureCurrentRaw()` turns on `AFECTRL_ADCPWR | AFECTRL_ADCCNV`.
+   * **Settle**: waits `delayMicroseconds(500)` for the double-layer charging transient to settle before the conversion is trusted.
+   * **Read Result**: `AD5940_TakeMeasurement()` polls the `SINC2RDY` ready flag (timeout budget: 1000 × 10 µs ticks) and returns the raw `AFERESULT_SINC2` code.
+   * **Convert to Current**: `RawToCurrent()` interprets the low 16 bits as signed two's-complement, then computes `I = (code × 1.82 V / 32768) / (PGA_gain × R_TIA)` using the `tia_rf`-selected resistor from the same `rf_values[]` table used in configuration.
+   * **Stream**: formats `CA,<time_s>,<current_A>` (e.g. `CA,0.5000,-1.8157e-04`) and prints it over Serial.
+   * **Pace the loop**: `delay(1000 / CA_SampleRate_Hz)` blocks until the next sample is due — this is a simple fixed-rate scheduler, not a hardware timer, so very high `CA_SampleRate_Hz` values are bounded by how fast the loop body itself executes.
+5. **Wrap-up**: after the loop, `AD5940_AFECtrlS()` powers down the ADC, waveform generator, and DAC reference, and the firmware prints `CA_END` as an explicit end-of-stream marker (see the hardware test script `python_ui/test_hardware_ca_swv_dpv.py`, which waits for exactly this marker with a hard deadline rather than blocking indefinitely).
 
 ---
 
@@ -149,6 +207,8 @@ For each step in the staircase sweep:
    * Outputs the coordinate `SWV,<voltage>,<delta_I>`.
 5. **Next Step**: Increments the staircase baseline voltage $V_{step}$ and repeats.
 
+`C_SWV::ConfigDCMeasurement()` performs the identical HSTIA + `SINC2RDY`→`AFEINTC_1` setup described in §2.1 and §3 for CA — both forward-pulse and reverse-pulse readings go through the same `MeasureCurrentRaw()`/`RawToCurrent()` pair as CA, just called twice per step instead of once.
+
 ---
 
 ## 6. Differential Pulse Voltammetry (DPV) in Code
@@ -184,6 +244,8 @@ For each step in the staircase sweep:
    * Outputs the coordinate `DPV,<voltage>,<delta_I>`.
 5. **Wait and Increment**:
    * Delays for the remainder of the pulse period, increments $V_{step}$, and repeats.
+
+`C_DPV::ConfigDCMeasurement()` mirrors CA/SWV's HSTIA + `SINC2RDY`→`AFEINTC_1` setup (§2.1, §3). The staircase step size (`DPV_Step_mV`) is set with the `!<float>` serial command — added this session; previously there was no way to change it without editing `DEFAULT_DPV_STEP` in `data_storage.h` and reflashing.
 
 ---
 

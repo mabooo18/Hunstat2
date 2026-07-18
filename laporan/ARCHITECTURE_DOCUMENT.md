@@ -82,6 +82,10 @@ Each method is encapsulated in a dedicated C++ class:
 - **`C_SWV`**: Sweeps potential in a staircase pattern overlaid with square pulses. Measures current at the end of both forward and reverse pulses to compute differential current $\Delta I$.
 - **`C_DPV`**: Sweeps potential in a staircase pattern with periodic pulses. Measures current before the pulse and just before the end of the pulse to isolate faradaic current.
 
+`C_CA::ConfigDCMeasurement()`, `C_SWV::ConfigDCMeasurement()` and `C_DPV::ConfigDCMeasurement()` are near-identical: all three power up the same amplifier set, route the same switch matrix (`SWD_CE0`/`SWP_RE0`/`SWN_SE0`/`SWT_TRTIA|SWT_SE0LOAD`), configure the same HSTIA feedback block, and route `SINC2RDY` into the same interrupt controller (`AFEINTC_1`). This is intentional duplication rather than shared inheritance — `electrochemical_methods.h`'s base class only declares `Begin(C_DataStorage*)` as virtual, so each class re-implements its own `ConfigDCMeasurement`/`MeasureCurrentRaw`/`RawToCurrent`. A shared private helper would remove the triplication, but as of this writing the three copies are kept in sync by hand — see §8, items 1–2, for a concrete case where they briefly drifted.
+
+> **Dead code warning**: `src/electrochemical_methods/electrochemical_methods.cpp` also defines free-function versions of the same routines — `RunCA()`, `RunSWV()`, `RunDPV()`, `Config_AD5941_DCMeasurement()` — operating on plain global variables (`CA_Voltage_mV`, `SWV_Start_mV`, etc.) instead of `C_DataStorage`. Likewise `src/command_processing/command_processing.cpp` re-implements the entire serial parser (`ProcessToken`, `ProcessCommand`, `ShowParameters`, ...) against those same globals. **Neither file is called from anywhere in the live call graph** — `AD5941_25.ino`'s `loop()` only calls `g_Comm.ReadAndProcess()` (the `C_Communication` class in §3.3), which dispatches to the `C_CA`/`C_SWV`/`C_DPV`/`C_EIS`/`C_OCP` classes in §3.4, never to the procedural free functions. Because Arduino compiles every `.cpp` file under the sketch folder regardless of whether anything calls it, this legacy pair still occupies flash and — more importantly — is a trap for future debugging: editing `RunCA()` in `electrochemical_methods.cpp` will have **zero effect** on the running firmware. Treat `communication.cpp` + `c_ca.cpp`/`c_swv.cpp`/`c_dpv.cpp`/`c_eis.cpp`/`c_ocp.cpp` as the only live implementation.
+
 ### 3.5. Voltammetry Sequencer (`rampTest.cpp` & `cv.cpp`)
 Cyclic Voltammetry (CV) requires precise potential sweeps. To prevent jitter from the microcontroller, the firmware configures the AD5940's hardware sequencer (`SEQ0`, `SEQ1`, `SEQ2`). The sequencer updates the Low-Power DAC (LPDAC) and automatically triggers ADC conversions, and interrupts the MCU when data blocks are ready in the FIFO.
 
@@ -89,8 +93,9 @@ Cyclic Voltammetry (CV) requires precise potential sweeps. To prevent jitter fro
 Maps SPI connections and control lines to the AD5941 chip:
 - **SPI Chip Select (CS)**: Pin `D7`
 - **AD5940 Reset (RST)**: Pin `A1`
-- **AD5940 Interrupt (INT)**: Pin `A2` (triggers `Ext_Int0_Handler()` on a falling edge to signal data availability).
-- **SPI Bus Speed**: 12 MHz, Mode 0.
+- **AD5940 Interrupt (INT)**: Pin `A2` (triggers `Ext_Int0_Handler()` on a falling edge to signal data availability). The ISR itself is intentionally minimal (`ucInterrupted = 1`); actual FIFO/data handling happens later during the main polling loop, not inside the interrupt context.
+- **SPI Transport — bit-banged, not the hardware SPI peripheral**: this board wires the AD5941's MISO to physical pin `D10` and MOSI to `D9`, which is the *reverse* of the XIAO RP2040's native hardware SPI0 role assignment for those same pins (hardware SPI0 expects SCK=`D8`, MISO=`D9`, MOSI=`D10`). The RP2040's SPI peripheral pin-mux cannot swap that role, so `AD5940_ReadWriteNBytes()` no longer calls the Arduino `SPI` library at all — it drives a small hand-rolled `BitBangSPI` class (Mode 0: CPOL=0, CPHA=0, MSB-first) that toggles `D8` (SCK), `D9` (MOSI) and reads `D10` (MISO) directly via `digitalWrite`/`digitalRead` inside `AD5940_MCUResourceInit()`. This trades raw throughput (bit-banged transfers top out well below the AD5941's rated 12 MHz SPI ceiling — actual speed is bounded by GPIO toggle latency, roughly hundreds of kHz) for correctness on boards where the physical MISO/MOSI wiring doesn't match the RP2040's fixed hardware role.
+  - **Symptom if this regresses**: if a future board revision restores standard wiring, or someone reverts to `SPI.begin()`/`SPI.transfer()`, the chip ID register will read back `0x0000` or `0xFFFF` because MISO and MOSI are effectively swapped — see §7 (SPI Bus Stability) for the general symptom, and §8 below for this specific case.
 
 ---
 
@@ -140,6 +145,8 @@ Performs interactive control using ASCII command inputs. Multi-parameter command
 | `!<float>` | `DPV_Step_mV` | Staircase step height in mV |
 | `#<float>` | `DPV_Amplitude_mV`| Pulse modulation amplitude in mV |
 
+> **`!` is overloaded, disambiguated by the tokenizer's match order.** `ProcessToken()` (§4.4 below) tries `sscanf` patterns from most-specific to least-specific: 2-hex-arg, 2-float-arg, 1-hex-arg, 1-float-arg, and only *then* falls back to the bare single-character form. So `!20` matches the "command + 1 float" pattern first and sets `DPV_Step_mV = 20`, while a lone `!` (no digits following) fails every numeric pattern and falls through to `ProcessCommand('!')`, which prints the command history. There is no real ambiguity at runtime, but it means `!` cannot be followed by a bare newline-then-digit split across two serial writes without the digits being swallowed as a separate token — send `!20` as one token, not `!` then `20`. Before this session, `DPV_Step_mV` had **no serial command at all**; the DPV step size could only be changed by editing `DEFAULT_DPV_STEP` in `data_storage.h` and reflashing. `!` was chosen because it was the next unused printable ASCII slot adjacent to the other DPV parameter characters (`9`, `0`, `#`).
+
 ### 4.3. Execution Trigger Commands
 
 | Command Char | Action | Description |
@@ -157,6 +164,20 @@ Performs interactive control using ASCII command inputs. Multi-parameter command
 | `A` | `DispatchCA()` | Begins CA measurement execution |
 | `W` | `DispatchSWV()` | Begins SWV measurement execution |
 | `D` | `DispatchDPV()` | Begins DPV measurement execution |
+
+### 4.4. Tokenizer Parsing Order
+
+`C_Communication::ProcessToken()` never inspects the command character before deciding which parser to try — it just attempts a fixed sequence of `sscanf` patterns against the whole token and takes the first one that matches fully, in this order:
+
+1. Fixed multi-field formats checked first and independently of the generic dispatch below: `M<int>,<int>,<int>` (OCP calibration sweep setup) and `D <float>,<float>,<float>,<float>,<int>` (CV sweep setup — note this reuses the letter `D`, distinct from the bare `D` in §4.3 which runs DPV).
+2. Hex register read/write shorthand: `ri8/ri16/ri32/ru8/ru16/ru32 0x<addr>` and `wi8/.../wu32 0x<addr>,0x<val>`.
+3. `<cmd> 0x<hex>,0x<hex>` or `<cmd>0x<hex>,0x<hex>` → `ProcessCommand2Int`.
+4. `<cmd> <float>,<float>` or `<cmd><float>,<float>` → `ProcessCommand2Float`.
+5. `<cmd> 0x<hex>` or `<cmd>0x<hex>` → `ProcessCommand1Int`.
+6. `<cmd> <float>` or `<cmd><float>` → `ProcessCommand1Float` (this is where `1400`, `!20`, `B-50` etc. land).
+7. Anything else with at least one character → `ProcessCommand(token[0])`, the bare single-letter trigger table in §4.3.
+
+Because step 6 is tried before step 7, **any command letter that is also a valid trigger character behaves as a parameter setter whenever a number follows it, and as a trigger only when it stands alone** — this is what makes `!` (§4.2) and `M`/`D` (step 1) safely dual-purpose without an explicit priority flag anywhere in the code.
 
 ---
 
@@ -197,14 +218,28 @@ graph TD
 
 ## 6. LED and NeoPixel Color Indicator Guide
 
-The board features status visualizer feedback through an onboard NeoPixel or LED:
-- **WHITE**: Initializing / Performing calibration.
-- **BLUE**: Running EIS scan (mode `0` - measuring working impedance $R_z$).
-- **RED**: Running EIS scan (mode `1` - measuring internal reference resistor $R_{cal}$) OR running Cyclic Voltammetry (CV).
-- **MAGENTA**: Performing Open Circuit Potential (OCP) read or DPV test.
-- **CYAN**: Running Chronoamperometry (CA).
-- **YELLOW**: Running Square Wave Voltammetry (SWV).
-- **GREEN**: Measurement successfully completed / System idle.
+Every electrochemical method class calls `Utils_SetStatusLed(<COLOR>)` at the *intended* transition points, and the color each call site passes is genuinely method-specific:
+
+| Color | Call site | Meaning |
+| :--- | :--- | :--- |
+| **WHITE** | `C_EIS::Run()` start | Running `Calibrate_HSDAC()` before the frequency sweep begins |
+| **BLUE** | `C_EIS::Run()`, `EIS_Mode == 0` | EIS sweep measuring the working cell impedance ($R_z$) |
+| **RED** | `C_EIS::Run()`, `EIS_Mode == 1` | EIS sweep measuring the internal calibration resistor ($R_{cal}$) |
+| **MAGENTA** | `C_OCP::Measure()`, `C_DPV::Run()` | OCP read in progress, or DPV sweep in progress |
+| **CYAN** | `C_CA::Run()` | CA sweep in progress |
+| **YELLOW** | `C_SWV::Run()` | SWV sweep in progress |
+| **GREEN** | end of every `Run()`/`Measure()` | Measurement finished / system idle |
+
+> **This table describes intent, not current behavior — the LED does not actually change color.** `Interface_SetLed(uint8_t color)` in `src/interface/led_interface.cpp` silently **ignores its `color` argument** and unconditionally sets the NeoPixel to solid white (`pixels.Color(255, 255, 255)`) on every call:
+> ```cpp
+> void Interface_SetLed(uint8_t color)
+> {
+>     pixels.clear();
+>     pixels.setPixelColor(0, pixels.Color(255, 255, 255)); // color parameter unused
+>     pixels.show();
+> }
+> ```
+> `Utils_SetStatusLed()` (`src/utils/status_utils.cpp`) just forwards straight to `Interface_SetLed()`, so every call site above — despite passing a distinct, correctly-named color constant — currently produces the same solid white LED regardless of which method is running or whether it finished. The only color that actually differs on-screen is the separate RGB path, `Interface_SetPixelsColor(r,g,b)` / `Utils_SetStatusPixels(r,g,b)`, which *does* honor its arguments and is called with green (`0,255,0`) after CV, OCP, and EIS complete (`AD5941_25.ino`'s CV/OCP paths and `C_EIS::Run()`). Fixing the color table above to actually reflect method state only requires switching on `color` inside `Interface_SetLed()` (e.g. a small lookup table from the color index to an RGB triple) instead of hardcoding white — nothing about the call sites themselves needs to change.
 
 ---
 
@@ -214,4 +249,18 @@ The board features status visualizer feedback through an onboard NeoPixel or LED
 2. **Dependencies**:
    - `Adafruit_NeoPixel`: Drives the status RGB LED.
    - `LibPrintf`: Required for printf redirects on Arduino platforms.
-3. **SPI Connection Stability**: Ensure the SPI connection is short and shielded. Noise on lines can cause `CHIPID` to be read incorrectly (typical values $0x0000$ or $0xFFFF$), which halts the initialization check.
+3. **SPI Connection Stability**: Ensure the SPI connection is short and shielded. Noise on lines can cause `CHIPID` to be read incorrectly (typical values $0x0000$ or $0xFFFF$), which halts the initialization check. On this board the SPI transport is bit-banged (§3.6) rather than hardware SPI, so this failure mode is also what you'd see if the bit-bang pin assignments (`SPI_NEW_SCK`/`SPI_NEW_MOSI`/`SPI_NEW_MISO`) ever stop matching the board's actual wiring.
+
+---
+
+## 8. Known Issues and Recent Fixes (this session)
+
+A hands-on hardware debugging session (COM port recovery + a live CA run against a dummy test cell) surfaced the following, cross-referenced against the working tree at the time:
+
+1. **CA/SWV/DPV read a stale/zero current — fixed.** `C_CA::ConfigDCMeasurement()`, `C_SWV::ConfigDCMeasurement()`, and `C_DPV::ConfigDCMeasurement()` configured the switch matrix but never wrote `HpLoopCfg.HsTiaCfg` (`HstiaBias`, `HstiaCtia`, `HstiaDeRload`, `HstiaDeRtia`, `HstiaRtiaSel`) before calling `AD5940_HSLoopCfgS()`. Since `HpLoopCfg` is a shared global struct zeroed at boot, the transimpedance amplifier feedback path was left at whatever the last caller configured it to (or zero), so current readings could silently be wrong regardless of actual cell current. All three now populate the HSTIA block explicitly, keyed off `tia_rf` the same way `RawToCurrent()`'s `rf_values[]` lookup expects.
+2. **`MeasureCurrentRaw()` could time out and silently return 0 — fixed.** The same three classes never routed the `SINC2RDY` interrupt source into `AFEINTC_1` (`AD5940_INTCCfg(AFEINTC_1, AFEINTSRC_ALLINT, bTRUE)`), so `AD5940_TakeMeasurement()`'s internal ready-flag poll could never observe a true flag. This was partially masked by a very short `time_out = 100` (10µs-tick) budget, which has been raised to `1000` alongside adding the missing interrupt routing.
+3. **DPV step size had no serial command — fixed.** See §4.2's note on `!<float>`; `DPV_Step_mV` previously required a firmware rebuild to change.
+4. **`Calibrate_HSDAC()` corrupted the shared `clk_cfg` — fixed.** It used to write directly into the file-scope `clk_cfg` struct with `HfOSC32MHzMode = bTRUE` for calibration, leaving that flag set afterward. `C_EIS::Run()` reads the same `clk_cfg` later to decide whether to enable 32 MHz mode based on measurement frequency (§3 in the technical report's EIS section) — since `AD5940_CLKCfg()` only applies `HfOSC32MHzMode` when `HFOSCEn == bTRUE`, a leftover `bTRUE` from calibration could make a subsequent low-frequency EIS step silently run at the wrong clock rate. Calibration now uses a local `local_clk_cfg` and separately re-asserts only `clk_cfg.HFOSCEn = bTRUE` on the shared struct, without touching its `HfOSC32MHzMode` field.
+5. **Board's SPI wiring required bit-banged SPI — fixed**, see §3.6.
+6. **Status LED color never changes — still open**, see §6.
+7. **Dead procedural implementation still compiles alongside the live OOP path — still open**, see §3.4's dead code warning.
