@@ -10,13 +10,13 @@ Semua metode elektrokimia pada HunStat2 membaca arus sel ($I_{\text{cell}}$) mel
 
 ### Rumus Inti Konversi Kode C++ (`RawToCurrent`)
 
-$$I_{\text{cell}} (\text{Ampere}) = \frac{\text{code}_{\text{signed}} \times V_{\text{ref}}}{32768 \times 1000 \times G_{\text{PGA}} \times R_{\text{TIA}}}$$
+$$I_{\text{cell}} (\text{Ampere}) = \frac{\text{code} \times V_{\text{ref}}}{32768 \times 1000 \times G_{\text{PGA}} \times R_{\text{TIA}}}$$
 
 ### Keterangan Komponen Perhitungan:
 
 | Variabel | Nama / Istilah Kode | Nilai / Sumber | Fungsi & Deskripsi |
 |---|---|---|---|
-| $\text{code}_{\text{signed}}$ | `code` | `(int16_t)(rawCode & 0xFFFF)` | Nilai biner 16-bit *signed two's complement* dari filter Sinc2 ADC. |
+| $\text{code}$ | `code` | `(int16_t)(rawCode & 0xFFFF)` | Nilai biner 16-bit *signed two's complement* dari filter Sinc2 ADC. |
 | $V_{\text{ref}}$ | `Vref_mV` | `1820.0` mV ($1.82\text{ V}$) | Tegangan acuan internal ADC chip AD5941. |
 | $G_{\text{PGA}}$ | `PGA_G` | `1.0` ($1\times$) | Penguatan Programmable Gain Amplifier ADC. |
 | $R_{\text{TIA}}$ | `Rf_Ohm` | `rf_values[tia_rf]` | Resistansi umpan balik HSTIA ($\Omega$). Pilihan resistor: $\{200, 1000, 5000, 10000, 20000, 40000, 80000, 160000\}\ \Omega$. |
@@ -39,13 +39,13 @@ Chronoamperometry adalah metode di mana potensial listrik tunggal yang konstan d
 ### C. Rumus & Perhitungan Matematika
 
 1. **Jumlah Sampel Total ($N_{\text{samples}}$)**:
-   $$N_{\text{samples}} = \text{CA\_Duration\_s} \times \text{CA\_SampleRate\_Hz}$$
+   $$N_{\text{samples}} = \text{CA Duration (s)} \times \text{CA SampleRate (Hz)}$$
 
 2. **Waktu Pengamatan Titik ke-$i$ ($t_i$)**:
    $$t_i = \frac{i}{f_s} \quad \text{detik} \quad (i = 0, 1, 2, \dots, N_{\text{samples}}-1)$$
 
 3. **Arus Terukur ($I(t_i)$)**:
-   $$I(t_i) = \text{RawToCurrent}(\text{ADC\_Code}_i)$$
+   $$I(t_i) = \text{RawToCurrent}(\text{ADC Code}_i)$$
 
 ### D. Pencocokan dengan Teori Elektrokimia (Persamaan Cottrell)
 
@@ -85,7 +85,7 @@ SWV adalah teknik voltametri pulsa cepat di mana tegangan berbentuk tangga (*sta
    $$N_{\text{steps}} = \left\lfloor \frac{|E_{\text{end}} - E_{\text{start}}|}{\Delta E_s} \right\rfloor + 1$$
 
 2. **Setengah Periode Pulsa ($t_{\text{half}}$)**:
-   $$t_{\text{half}} = \frac{500,000}{f_{\text{sw}}} \quad (\mu\text{s})$$
+   $$t_{\text{half}} = \frac{500000}{f_{\text{sw}}} \quad (\mu\text{s})$$
 
 3. **Potensial Pulsa Maju (*Forward*) & Mundur (*Reverse*)**:
    $$V_{\text{forward}} = V_{\text{step}} + E_{\text{sw}}$$
@@ -112,7 +112,7 @@ DPV menerapkan pulsa tegangan periodik di atas pindaian tangga linier. Arus diuk
 | Parameter | Simbol Teori | Satuan | Deskripsi dalam Kode |
 |---|---|---|---|
 | `DPV_Start_mV` | $E_{\text{start}}$ | mV | Potensial awal pemindaian. |
-| `DPV_End_mV` | $E_{\text{end}}$ | mV | Potensial awal pemindaian. |
+| `DPV_End_mV` | $E_{\text{end}}$ | mV | Potensial akhir pemindaian. |
 | `DPV_Step_mV` | $\Delta E_s$ | mV | Kenaikan potensial tangga. |
 | `DPV_Amplitude_mV` | $E_{\text{pulse}}$ | mV | Amplitudo pulsa tegangan. |
 | `DPV_PulseWidth_s` | $t_w$ | Detik | Durasi/lebar pulsa tegangan. |
