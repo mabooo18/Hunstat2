@@ -98,7 +98,7 @@ SWV adalah teknik voltametri pulsa cepat di mana tegangan berbentuk tangga (*sta
 
 * **Korelasi Kode vs Teori**:
   * **Eliminasi Arus Kapasitif**: Pada pulsa maju ($V_{\text{forward}}$), reaksi reduksi diukur ($I_{\text{forward}}$). Pada pulsa mundur ($V_{\text{reverse}}$), reaksi re-oksidasi diukur ($I_{\text{reverse}}$). Karena arus pengisian kapasitif bernilai hampir persis sama pada kedua pulsa, penguraian diferensial $\Delta I = I_f - I_r$ menghapuskan arus kapasitif latar secara total.
-  * **Bentuk Puncak**: Kurva plot SWV ($\Delta I$ vs $V_{\text{step}}$) menghasilkan puncak (*peak*) yang sangat tajam pada potensial standar ($E^0'$), dengan sensitivitas hingga orde nanomolar ($nM$).
+  * **Bentuk Puncak**: Kurva plot SWV ($\Delta I$ vs $V_{\text{step}}$) menghasilkan puncak (*peak*) yang sangat tajam pada potensial standar formal (${E^0}'$), dengan sensitivitas hingga orde nanomolar ($nM$).
 
 ---
 
