@@ -112,7 +112,7 @@ DPV menerapkan pulsa tegangan periodik di atas pindaian tangga linier. Arus diuk
 | Parameter | Simbol Teori | Satuan | Deskripsi dalam Kode |
 |---|---|---|---|
 | `DPV_Start_mV` | $E_{\text{start}}$ | mV | Potensial awal pemindaian. |
-| `DPV_End_mV` | $E_{\text{end}}$ | mV | Potensial akhir pemindaian. |
+| `DPV_End_mV` | $E_{\text{end}}$ | mV | Potensial awal pemindaian. |
 | `DPV_Step_mV` | $\Delta E_s$ | mV | Kenaikan potensial tangga. |
 | `DPV_Amplitude_mV` | $E_{\text{pulse}}$ | mV | Amplitudo pulsa tegangan. |
 | `DPV_PulseWidth_s` | $t_w$ | Detik | Durasi/lebar pulsa tegangan. |
